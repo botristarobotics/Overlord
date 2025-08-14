@@ -170,14 +170,32 @@ var ClientBox = React.createClass({
 })
 
 var FilterInput = React.createClass({
+  componentDidMount: function () {
+    var params = new URLSearchParams(window.location.search);
+    var q = params.get('q');
+    if (q) {
+      this.refs.filter.value = q;
+      this.props.app.setDisplayFilterPattern(q);
+    }
+  },
   onKeyUp: function (event) {
-    this.props.app.setDisplayFilterPattern(this.refs.filter.value);
+    const value = this.refs.filter.value;
+    this.props.app.setDisplayFilterPattern(value);
+
+    const params = new URLSearchParams(window.location.search);
+    if (value) {
+      params.set('q', value);
+    } else {
+      params.delete('q');
+    }
+    const newUrl = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
+    window.history.replaceState({}, '', newUrl);
   },
   render: function () {
     return (
       <div>
         <input type="text" className="filter-input form-control" ref="filter"
-            placeholder="keyword" onKeyUp={this.onKeyUp}></input>
+            placeholder="keyword" onKeyUp={this.onKeyUp} defaultValue={this.props.defaultValue}></input>
       </div>
     )
   }

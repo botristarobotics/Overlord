@@ -115,6 +115,9 @@ type Overlord struct {
 	downloadsMu      sync.Mutex                        // Mutex for downloads
 	uploadsMu        sync.Mutex                        // Mutex for uploads
 	ioserverMu       sync.Mutex                        // Mutex for ioserver
+
+	cbAPI string
+	cbWeb string
 }
 
 // NewOverlord creates an Overlord object.
@@ -122,7 +125,8 @@ func NewOverlord(
 	bindAddr string, port int,
 	lanDiscInterface string,
 	lanDisc bool, auth bool,
-	certsString string, linkTLS bool, htpasswdPath string) *Overlord {
+	certsString string, linkTLS bool, htpasswdPath string,
+	cbAPI string, cbWeb string) *Overlord {
 
 	var certs *TLSCerts
 	if certsString != "" {
@@ -153,6 +157,8 @@ func NewOverlord(
 		certs:            certs,
 		linkTLS:          linkTLS,
 		htpasswdPath:     htpasswdPath,
+		cbAPI:            cbAPI,
+		cbWeb:            cbWeb,
 		agents:           make(map[string]*ConnServer),
 		logcats:          make(map[string]map[string]*ConnServer),
 		wsctxs:           make(map[string]*webSocketContext),
@@ -891,43 +897,46 @@ func (ovl *Overlord) RegisterHTTPHandlers() {
 
 	appDir := ovl.GetAppDir()
 
-	// HTTP basic auth
-	auth := NewBasicAuth("Overlord", ovl.htpasswdPath, !ovl.auth)
+	auth := NewAuth(ovl.cbAPI, ovl.cbWeb,
+		NewBasicAuth("Overlord", ovl.htpasswdPath, !ovl.auth), !ovl.auth)
+	view := func(h http.HandlerFunc) http.Handler { return auth.Wrap(h, permView) }
+	edit := func(h http.HandlerFunc) http.Handler { return auth.Wrap(h, permEdit) }
 
 	http.HandleFunc("/connect", GhostConnectHandler)
+	http.HandleFunc("/auth/callback", auth.CallbackHandler)
 
 	// Register the request handlers.
 	r := mux.NewRouter()
 
-	r.HandleFunc("/api/apps/list", AppsListHandler)
-	r.HandleFunc("/api/agents/list", AgentsListHandler)
-	r.HandleFunc("/api/agents/upgrade", AgentsUpgradeHandler)
-	r.HandleFunc("/api/logcats/list", LogcatsListHandler)
+	r.Handle("/api/apps/list", view(AppsListHandler))
+	r.Handle("/api/agents/list", view(AgentsListHandler))
+	r.Handle("/api/agents/upgrade", edit(AgentsUpgradeHandler))
+	r.Handle("/api/logcats/list", view(LogcatsListHandler))
 
 	// Logcat methods
-	r.HandleFunc("/api/log/{mid}/{sid}", LogcatHandler)
+	r.Handle("/api/log/{mid}/{sid}", view(LogcatHandler))
 
 	// Agent methods
-	r.HandleFunc("/api/agent/tty/{mid}", AgentTtyHandler)
-	r.HandleFunc("/api/agent/shell/{mid}", ModeShellHandler)
-	r.HandleFunc("/api/agent/properties/{mid}", AgentPropertiesHandler)
-	r.HandleFunc("/api/agent/download/{mid}", AgentDownloadHandler)
-	r.HandleFunc("/api/agent/upload/{mid}", AgentUploadHandler)
-	r.HandleFunc("/api/agent/forward/{mid}", AgentModeForwardHandler)
+	r.Handle("/api/agent/tty/{mid}", edit(AgentTtyHandler))
+	r.Handle("/api/agent/shell/{mid}", edit(ModeShellHandler))
+	r.Handle("/api/agent/properties/{mid}", view(AgentPropertiesHandler))
+	r.Handle("/api/agent/download/{mid}", edit(AgentDownloadHandler))
+	r.Handle("/api/agent/upload/{mid}", edit(AgentUploadHandler))
+	r.Handle("/api/agent/forward/{mid}", edit(AgentModeForwardHandler))
 
 	// File methods
-	r.HandleFunc("/api/file/download/{sid}", FileDownloadHandler)
+	r.Handle("/api/file/download/{sid}", edit(FileDownloadHandler))
 
-	http.Handle("/api/", auth.WrapHandler(r))
-	http.Handle("/api/socket.io/", auth.WrapHandler(ovl.ioserver))
+	http.Handle("/api/", r)
+	http.Handle("/api/socket.io/", auth.Wrap(ovl.ioserver, permView))
 
 	// /upgrade/ does not need authenticiation
 	http.Handle("/upgrade/", http.StripPrefix("/upgrade/",
 		http.FileServer(http.Dir(filepath.Join(appDir, "upgrade")))))
-	http.Handle("/vendor/", auth.WrapHandler(http.FileServer(
-		http.Dir(filepath.Join(appDir, "common")))))
-	http.Handle("/", auth.WrapHandler(http.FileServer(
-		http.Dir(filepath.Join(appDir, "dashboard")))))
+	http.Handle("/vendor/", auth.Wrap(http.FileServer(
+		http.Dir(filepath.Join(appDir, "common"))), permView))
+	http.Handle("/", auth.Wrap(http.FileServer(
+		http.Dir(filepath.Join(appDir, "dashboard"))), permView))
 
 	// Serve all apps
 	appNames, err := ovl.GetAppNames(false)
@@ -944,7 +953,7 @@ func (ovl *Overlord) RegisterHTTPHandlers() {
 		}
 		prefix := fmt.Sprintf("/%s/", app)
 		http.Handle(prefix, http.StripPrefix(prefix,
-			auth.WrapHandler(http.FileServer(http.Dir(filepath.Join(appDir, app))))))
+			auth.Wrap(http.FileServer(http.Dir(filepath.Join(appDir, app))), permView)))
 	}
 }
 
@@ -1065,8 +1074,8 @@ func (ovl *Overlord) Serv() {
 
 // StartOverlord starts the overlord server.
 func StartOverlord(bindAddr string, port int, lanDiscInterface string, lanDisc bool, auth bool,
-	certsString string, linkTLS bool, htpasswdPath string) {
+	certsString string, linkTLS bool, htpasswdPath string, cbAPI string, cbWeb string) {
 	ovl := NewOverlord(bindAddr, port, lanDiscInterface, lanDisc, auth,
-		certsString, linkTLS, htpasswdPath)
+		certsString, linkTLS, htpasswdPath, cbAPI, cbWeb)
 	ovl.Serv()
 }
